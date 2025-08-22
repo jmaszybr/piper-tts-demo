@@ -1,4 +1,3 @@
-
 FROM python:3.11-slim
 
 # Install curl for downloading model and minimal deps
@@ -9,9 +8,11 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download a lightweight Polish voice at build time (can change via PIPER_MODEL env if you bake different file)
-RUN curl -L -o pl_PL-mls_6892-low.onnx.gz \
-  https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL-mls_6892-low/pl_PL-mls_6892-low.onnx.gz
+# Download Polish voice "gosia / medium" (model + config)
+RUN curl -L -o pl_PL-gosia-medium.onnx \
+  https://huggingface.co/rhasspy/piper-voices/resolve/058271fb41b630e96989367e15b4514992a25b42/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx \
+  && curl -L -o pl_PL-gosia-medium.onnx.json \
+  https://huggingface.co/rhasspy/piper-voices/resolve/058271fb41b630e96989367e15b4514992a25b42/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx.json
 
 COPY app.py ./
 
