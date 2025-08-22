@@ -1,6 +1,7 @@
 import os
 import io
 import subprocess
+import tempfile
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,8 @@ app = FastAPI(title="Piper TTS Demo (secured)")
 MODEL = os.getenv("PIPER_MODEL", "pl_PL-gosia-medium.onnx")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # ustaw w Render → Environment
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")   # np. "https://joamas.pl,https://www.joamas.pl"
+# (opcjonalnie) limit długości tekstu by być łagodnym dla Free planu
+MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
 
 # === CORS (jeśli podasz domeny w ALLOWED_ORIGINS) ===
 origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
@@ -58,6 +61,10 @@ def _assert_model_files():
         raise RuntimeError(f"Config file not found: {json_path}")
 
 # === Endpointy ===
+@app.get("/")
+def root():
+    return JSONResponse({"service": "Piper TTS Demo", "endpoints": ["/healthz", "/diag", "/tts"]})
+
 @app.get("/healthz")
 def healthz():
     try:
@@ -66,6 +73,32 @@ def healthz():
     except Exception as e:
         # Zwracamy info diagnostyczne — łatwiej namierzyć problem w GUI/Browser
         return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
+
+@app.get("/diag")
+def diag():
+    # Prosta diagnostyka obecności plików modelu + test uruchomienia
+    info = {"model": MODEL, "cwd_files": [], "sizes": {}}
+    try:
+        info["cwd_files"] = sorted([f for f in os.listdir(".") if f.startswith("pl_PL-")])
+        for fname in info["cwd_files"]:
+            try:
+                st = os.stat(fname)
+                info["sizes"][fname] = st.st_size
+            except Exception as e:
+                info["sizes"][fname] = f"stat error: {e}"
+        # suchy test piper (krótki tekst)
+        proc = subprocess.run(
+            ["piper", "--model", MODEL, "--output_file", "-"],
+            input="Test diagnostyczny.".encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        info["piper_returncode"] = proc.returncode
+        info["wav_bytes"] = len(proc.stdout or b"")
+        info["stderr"] = (proc.stderr or b"").decode("utf-8", "ignore")[:4000]
+    except Exception as e:
+        info["diag_error"] = str(e)
+    return JSONResponse(info)
 
 @app.post("/tts")
 async def tts(req: Request, _=Depends(auth_guard)):
@@ -78,64 +111,39 @@ async def tts(req: Request, _=Depends(auth_guard)):
     if not text:
         raise HTTPException(status_code=400, detail="Field 'text' is required")
 
-    # Sprawdzenie plików modelu przed wywołaniem Pipera
+    # lekkie „oczyszczenie” i limit długości (Free plan)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "\n".join([ln.strip() for ln in text.split("\n") if ln.strip()])
+    if MAX_CHARS and len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
     try:
         _assert_model_files()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Wywołanie piper CLI: output WAV na stdout ("-")
+    # 🔧 ZAPIS DO PLIKU TYMCZASOWEGO (zamiast stdout) – fix na "Illegal seek"
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
     try:
         proc = subprocess.run(
-            ["piper", "--model", MODEL, "--output_file", "-"],
+            ["piper", "--model", MODEL, "--output_file", tmp_path],
             input=text.encode("utf-8"),
-            stdout=subprocess.PIPE,
+            stdout=subprocess.PIPE,   # nieużywane, ale zbieramy na wszelki wypadek
             stderr=subprocess.PIPE,
             check=True,
         )
+        # Odczyt gotowego WAV
+        with open(tmp_path, "rb") as f:
+            wav_bytes = f.read()
+        return StreamingResponse(io.BytesIO(wav_bytes), media_type="audio/wav")
     except subprocess.CalledProcessError as e:
-        # Złap fragment stderr, żeby nie zalewać logiem
-        err = e.stderr.decode("utf-8", "ignore")[:800]
+        err = e.stderr.decode("utf-8", "ignore")
         raise HTTPException(status_code=500, detail=f"Piper error: {err}")
-
-    return StreamingResponse(io.BytesIO(proc.stdout), media_type="audio/wav")
-
-# Strona główna (prosty tekst, żeby 404 nie straszyło)
-@app.get("/")
-def root():
-    return JSONResponse({"service": "Piper TTS Demo", "endpoints": ["/healthz", "/tts"]})
-
-
-import json, os, subprocess, tempfile, shutil
-
-@app.get("/diag")
-def diag():
-    info = {
-        "model": MODEL,
-        "cwd_files": sorted([f for f in os.listdir(".") if f.startswith("pl_PL-")]),
-    }
-
-    # rozmiary plików
-    for fname in info["cwd_files"]:
+    finally:
         try:
-            st = os.stat(fname)
-            info.setdefault("sizes", {})[fname] = st.st_size
-        except Exception as e:
-            info.setdefault("sizes", {})[fname] = f"stat error: {e}"
-
-    # spróbuj uruchomić piper „na sucho” na krótkim tekście
-    try:
-        proc = subprocess.run(
-            ["piper", "--model", MODEL, "--output_file", "-"],
-            input="Test diagnostyczny.".encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        info["piper_returncode"] = proc.returncode
-        info["wav_bytes"] = len(proc.stdout)
-        info["stderr"] = proc.stderr.decode("utf-8", "ignore")[:4000]  # pełniejszy log
-    except Exception as e:
-        info["piper_exec_error"] = str(e)
-
-    return JSONResponse(info)
-
+            os.remove(tmp_path)
+        except Exception:
+            pass
