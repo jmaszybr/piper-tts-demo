@@ -1,18 +1,19 @@
-
 import os
 import io
 import subprocess
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Piper TTS Demo (secured)")
 
+# === Konfiguracja ===
+# Domyślnie używamy głosu "gosia / medium" pobieranego w Dockerfile.
 MODEL = os.getenv("PIPER_MODEL", "pl_PL-gosia-medium.onnx")
-TTS_API_KEY = os.getenv("TTS_API_KEY", "")  # set in Render
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")  # e.g., https://joamas.pl,https://www.joamas.pl
+TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # ustaw w Render → Environment
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")   # np. "https://joamas.pl,https://www.joamas.pl"
 
-# CORS
+# === CORS (jeśli podasz domeny w ALLOWED_ORIGINS) ===
 origins = [o.strip() for o in ALLOWED_ORIGINS.split(",") if o.strip()]
 if origins:
     app.add_middleware(
@@ -23,8 +24,13 @@ if origins:
         allow_headers=["*"],
     )
 
+# === Prosty Bearer auth ===
 def auth_guard(request: Request):
-    """Require header Authorization: Bearer <TTS_API_KEY> (if key is set)."""
+    """
+    Wymaga nagłówka:
+      Authorization: Bearer <TTS_API_KEY>
+    tylko jeśli TTS_API_KEY jest ustawiony.
+    """
     if not TTS_API_KEY:
         return
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -34,17 +40,51 @@ def auth_guard(request: Request):
     if token != TTS_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid token")
 
+# === Walidacja plików modelu ===
+def _assert_model_files():
+    """
+    Piper potrzebuje:
+      - pliku modelu .onnx (lub .onnx.gz) -> zgodnego z nazwą MODEL
+      - pliku konfiguracyjnego .onnx.json (ta sama nazwa bazowa)
+    """
+    # plik modelu:
+    if not os.path.isfile(MODEL):
+        raise RuntimeError(f"Model file not found: {MODEL}")
+
+    # plik JSON (dopasowany do nazwy bazowej, bez .gz)
+    base_no_gz = MODEL[:-3] if MODEL.endswith(".gz") else MODEL
+    json_path = base_no_gz + ".json"
+    if not os.path.isfile(json_path):
+        raise RuntimeError(f"Config file not found: {json_path}")
+
+# === Endpointy ===
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    try:
+        _assert_model_files()
+        return {"status": "ok"}
+    except Exception as e:
+        # Zwracamy info diagnostyczne — łatwiej namierzyć problem w GUI/Browser
+        return JSONResponse({"status": "error", "detail": str(e)}, status_code=500)
 
 @app.post("/tts")
 async def tts(req: Request, _=Depends(auth_guard)):
+    """
+    Body: {"text": "…"}
+    Zwraca: audio/wav (streaming)
+    """
     data = await req.json()
     text = (data.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Field 'text' is required")
 
+    # Sprawdzenie plików modelu przed wywołaniem Pipera
+    try:
+        _assert_model_files()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Wywołanie piper CLI: output WAV na stdout ("-")
     try:
         proc = subprocess.run(
             ["piper", "--model", MODEL, "--output_file", "-"],
@@ -54,6 +94,13 @@ async def tts(req: Request, _=Depends(auth_guard)):
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Piper error: {e.stderr.decode('utf-8', 'ignore')[:400]}")
+        # Złap fragment stderr, żeby nie zalewać logiem
+        err = e.stderr.decode("utf-8", "ignore")[:800]
+        raise HTTPException(status_code=500, detail=f"Piper error: {err}")
 
     return StreamingResponse(io.BytesIO(proc.stdout), media_type="audio/wav")
+
+# Strona główna (prosty tekst, żeby 404 nie straszyło)
+@app.get("/")
+def root():
+    return JSONResponse({"service": "Piper TTS Demo", "endpoints": ["/healthz", "/tts"]})
