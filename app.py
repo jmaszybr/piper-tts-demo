@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Piper TTS Demo (secured)")
 
-MODEL = os.getenv("PIPER_MODEL", "pl_PL-mls_6892-low.onnx.gz")
+MODEL = os.getenv("PIPER_MODEL", "pl_PL-gosia-medium.onnx")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")  # set in Render
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")  # e.g., https://joamas.pl,https://www.joamas.pl
 
