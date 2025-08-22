@@ -1,4 +1,3 @@
-
 services:
   - type: web
     name: piper-tts-demo
@@ -7,8 +6,8 @@ services:
     healthCheckPath: /healthz
     envVars:
       - key: TTS_API_KEY
-        sync: false     # set value in Render Dashboard
+        sync: false     # ustawisz wartość w Render Dashboard
       - key: ALLOWED_ORIGINS
         value: https://joamas.pl
       - key: PIPER_MODEL
-        value: pl_PL-mls_6892-low.onnx.gz
+        value: pl_PL-gosia-medium.onnx
