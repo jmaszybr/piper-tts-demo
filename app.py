@@ -104,3 +104,38 @@ async def tts(req: Request, _=Depends(auth_guard)):
 @app.get("/")
 def root():
     return JSONResponse({"service": "Piper TTS Demo", "endpoints": ["/healthz", "/tts"]})
+
+
+import json, os, subprocess, tempfile, shutil
+
+@app.get("/diag")
+def diag():
+    info = {
+        "model": MODEL,
+        "cwd_files": sorted([f for f in os.listdir(".") if f.startswith("pl_PL-")]),
+    }
+
+    # rozmiary plików
+    for fname in info["cwd_files"]:
+        try:
+            st = os.stat(fname)
+            info.setdefault("sizes", {})[fname] = st.st_size
+        except Exception as e:
+            info.setdefault("sizes", {})[fname] = f"stat error: {e}"
+
+    # spróbuj uruchomić piper „na sucho” na krótkim tekście
+    try:
+        proc = subprocess.run(
+            ["piper", "--model", MODEL, "--output_file", "-"],
+            input="Test diagnostyczny.".encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        info["piper_returncode"] = proc.returncode
+        info["wav_bytes"] = len(proc.stdout)
+        info["stderr"] = proc.stderr.decode("utf-8", "ignore")[:4000]  # pełniejszy log
+    except Exception as e:
+        info["piper_exec_error"] = str(e)
+
+    return JSONResponse(info)
+
